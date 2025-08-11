@@ -1,0 +1,201 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PacketScope</title>
+  <style>
+    body{font-family: ui-sans-serif, system-ui, -apple-system; margin:0; background:#0b0d11; color:#e6e9ef}
+    header{display:flex;gap:16px;align-items:center;padding:12px 16px;border-bottom:1px solid #1a1f29;position:sticky;top:0;background:#0b0d11}
+    input,select,button,textarea{background:#111420;border:1px solid #2a3342;color:#e6e9ef;border-radius:8px;padding:8px}
+    button{cursor:pointer}
+    .container{padding:16px}
+    table{width:100%;border-collapse:separate;border-spacing:0 6px}
+    th,td{padding:10px 12px;text-align:left}
+    tr{background:#0f1420;border:1px solid #1a1f29}
+    tr:hover{background:#12192a}
+    .mono{font-family: ui-monospace, SFMono-Regular, Menlo, monospace}
+    .pill{padding:2px 8px;border-radius:999px;background:#1a2233;border:1px solid #2a3342}
+    .grid{display:grid;grid-template-columns:1fr 1fr; gap:16px}
+    .card{background:#0f1420;border:1px solid #1a1f29;border-radius:12px;padding:12px}
+    .muted{color:#9aa3b2}
+    .details-pre{white-space:pre-wrap;max-height:260px;overflow:auto}
+    .btn-detail{font-size:12px;padding:6px 10px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <header>
+    <strong>PacketScope</strong>
+    <input id="q" placeholder="Filter text (host/path)" />
+    <select id="method"><option value="">Method</option><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select>
+    <input id="host" placeholder="Host" />
+    <input id="ip" placeholder="IP" />
+    <input id="port" placeholder="Port" type="number" style="width:90px" />
+    <input id="pid" placeholder="PID" type="number" style="width:90px" />
+    <input id="exe" placeholder="exe (endswith)" />
+    <button id="btnSearch">Suchen</button>
+    <button onclick="openProxySettings()">Windows-Proxyeinstellungen</button>
+    <a href="/api/export/har" style="margin-left:auto;color:#7cc7ff">Export HAR</a>
+  </header>
+
+  <div class="container">
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin-top:0">Flows</h3>
+        <table id="flows"><thead><tr>
+          <th>Zeit</th><th>Method</th><th>Host</th><th>Pfad</th><th>Code</th><th>PID</th><th>exe</th><th>Client→Server</th><th>Aktion</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+      <div class="card" id="details"><h3 style="margin-top:0">Details</h3>
+        <div id="detailContent" class="mono muted">Button "Details" klicken…</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin-top:0">Fake Response Regel</h3>
+      <div style="display:grid;grid-template-columns:repeat(6, 1fr);gap:8px">
+        <input id="r_name" placeholder="Name" />
+        <input id="r_host" placeholder="host regex" />
+        <input id="r_path" placeholder="path regex" />
+        <input id="r_method" placeholder="Method" />
+        <input id="r_delay" placeholder="delay ms" type="number" />
+        <input id="r_status" placeholder="Status" type="number" value="200" />
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px">
+        <textarea id="r_headers" rows="3" placeholder='Headers JSON z.B. {"Content-Type":"application/json"}'></textarea>
+        <textarea id="r_body" rows="3" placeholder='Body'></textarea>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="btnAddRule">Regel hinzufügen/ersetzen</button>
+        <button id="btnRefreshRules">Regeln aktualisieren</button>
+        <div id="rules" class="muted" style="margin-left:auto"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  // ---------- Helpers ----------
+  function headersToText(obj){ return Object.entries(obj||{}).map(([k,v])=>`${k}: ${v}`).join('\n'); }
+  function escapeHtml(s){ return (s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+  function splitRaw(text){
+    const idx = text.indexOf('\r\n\r\n');
+    if(idx >= 0) return {headers:text.slice(0, idx), body:text.slice(idx+4)};
+    const idx2 = text.indexOf('\n\n');
+    if(idx2 >= 0) return {headers:text.slice(0, idx2), body:text.slice(idx2+2)};
+    return {headers:text, body:''};
+  }
+
+  // ---------- Flows table ----------
+  async function loadFlows(){
+    const params = new URLSearchParams();
+    const q = document.getElementById('q').value; if(q) params.set('q', q);
+    const method = document.getElementById('method').value; if(method) params.set('method', method);
+    const host = document.getElementById('host').value; if(host) params.set('host', host);
+    const ip = document.getElementById('ip').value; if(ip) params.set('ip', ip);
+    const port = document.getElementById('port').value; if(port) params.set('port', port);
+    const pid = document.getElementById('pid').value; if(pid) params.set('pid', pid);
+    const exe = document.getElementById('exe').value; if(exe) params.set('exe', exe);
+    const res = await fetch('/api/flows?'+params.toString());
+    const data = await res.json();
+    const tbody = document.querySelector('#flows tbody');
+    tbody.innerHTML = '';
+    for(const f of data){
+      const tr = document.createElement('tr');
+      tr.dataset.id = f.id;
+      tr.innerHTML = `
+        <td class="muted">${new Date(f.ts_start*1000).toLocaleTimeString()}</td>
+        <td><span class="pill">${f.method}</span></td>
+        <td>${f.host}</td>
+        <td class="mono">${f.path}</td>
+        <td>${f.status_code ?? ''}</td>
+        <td>${f.pid ?? ''}</td>
+        <td>${f.exe ?? ''}</td>
+        <td class="mono">${f.client_ip}:${f.client_port} → ${f.server_ip??''}:${f.server_port??''}</td>
+        <td><button class="btn-detail view-btn" data-id="${f.id}">Details</button></td>`;
+      tbody.appendChild(tr);
+    }
+  }
+
+  // Delegated click handler for Details buttons (stable across refreshes)
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.view-btn');
+    if(btn){
+      const id = btn.dataset.id;
+      if(id) openDetail(id);
+    }
+  });
+
+  async function openDetail(id){
+    const res = await fetch('/api/flows/'+id);
+    const f = await res.json();
+
+    const [reqRawTxt, respRawTxt] = await Promise.all([
+      fetch(`/api/flows/${id}/raw/request`).then(r=>r.text()).catch(()=>''),
+      fetch(`/api/flows/${id}/raw/response`).then(r=>r.text()).catch(()=>''),
+    ]);
+    const reqSplit = splitRaw(reqRawTxt);
+    const respSplit = splitRaw(respRawTxt);
+
+    const el = document.getElementById('detailContent');
+    el.innerHTML = `
+      <div><strong>${f.method}</strong> ${f.scheme}://${f.host}${f.path}</div>
+      <div class="muted">${f.client_ip}:${f.client_port} → ${f.server_ip??''}:${f.server_port??''}</div>
+      <div style="margin-top:8px" class="grid">
+        <div>
+          <div class="pill">Request</div>
+          <pre class="mono details-pre">${escapeHtml(headersToText(f.request_headers))}</pre>
+          <div class="pill">Body</div>
+          <pre class="mono details-pre">${escapeHtml(reqSplit.body)}</pre>
+          <a href="/api/flows/${id}/raw/request">Raw herunterladen</a>
+        </div>
+        <div>
+          <div class="pill">Response ${f.status_code??''}</div>
+          <pre class="mono details-pre">${escapeHtml(headersToText(f.response_headers||{}))}</pre>
+          <div class="pill">Body</div>
+          <pre class="mono details-pre">${escapeHtml(respSplit.body)}</pre>
+          <a href="/api/flows/${id}/raw/response">Raw herunterladen</a>
+        </div>
+      </div>`;
+  }
+
+  // ---------- Rules ----------
+  async function addRule(){
+    const name = document.getElementById('r_name').value.trim();
+    if(!name){ alert('Name fehlt'); return; }
+    const headersTxt = document.getElementById('r_headers').value.trim();
+    let headers = {}; if(headersTxt){ try{ headers = JSON.parse(headersTxt); } catch{ alert('Headers JSON ungültig'); return; } }
+    const body = document.getElementById('r_body').value;
+    const payload = {
+      name,
+      host_re: document.getElementById('r_host').value || null,
+      path_re: document.getElementById('r_path').value || null,
+      method: document.getElementById('r_method').value || null,
+      delay_ms: parseInt(document.getElementById('r_delay').value||'0'),
+      status_code: parseInt(document.getElementById('r_status').value||'200'),
+      headers, body
+    };
+    const res = await fetch('/api/rules', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    if(res.ok){ refreshRules(); }
+  }
+
+  async function refreshRules(){
+    const res = await fetch('/api/rules');
+    const rules = await res.json();
+    const el = document.getElementById('rules');
+    el.innerHTML = rules.map(r=>`<span class="pill">${r.name}</span>`).join(' ');
+  }
+
+  function openProxySettings(){ window.location.href = 'ms-settings:network-proxy'; }
+
+  // ---------- Wire up ----------
+  document.getElementById('btnSearch').addEventListener('click', loadFlows);
+  document.getElementById('btnAddRule').addEventListener('click', addRule);
+  document.getElementById('btnRefreshRules').addEventListener('click', refreshRules);
+
+  // initial load + polling
+  loadFlows();
+  setInterval(loadFlows, 2000);
+  refreshRules();
+  </script>
+</body>
+</html>
